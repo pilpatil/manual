@@ -1,4 +1,7 @@
 Мануал по настройке сетевой инфраструктуры
+
+https://telegra.ph/BONDARCHUK-GUIDE-03-24
+
 IP-адреса машин
 Имя	IP-адрес
 HQ RTR	172.16.4.1
@@ -206,3 +209,4 @@ http {
 }
 
 systemctl restart nginx
+

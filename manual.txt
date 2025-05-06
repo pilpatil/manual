@@ -1,0 +1,208 @@
+Мануал по настройке сетевой инфраструктуры
+IP-адреса машин
+Имя	IP-адрес
+HQ RTR	172.16.4.1
+BR RTR	172.16.5.1
+HQ SRV	192.168.0.1
+HQ CLI	192.168.0.65
+BR SRV	192.168.3.1
+1. Настройка доменного контроллера Samba (BR-SRV)
+# Сносим всё к **й
+rm -f etc/samba/smb.conf
+rm -rf var/lib/samba
+rm -rf var/cache/samba
+
+mkdir /var/lib/samba
+mkdir /var/lib/samba/sysvol
+
+# Магия от samba-tool
+samba-tool domain provision --use-rfc2307 --interactive
+# Нажать Enter 4 раза, затем ввести: NONE
+
+# Создание групп и пользователей
+samba-tool group add hq
+samba-tool user create user1.hq "P@ssw0rd" --home-directory=/home/AU-TEAM/user1.hq --uid=user1.hq
+samba-tool group addmembers hq user2.hq
+samba-tool group addmembers "Account Operators" hq
+samba-tool group addmembers "Allowed RODC Password Replication Group" hq
+
+systemctl restart samba.service
+systemctl status samba.service
+systemctl enable --now samba.service
+
+# Копируем конфиг Kerberos
+cp /var/lib/samba/private/krb5.conf  /etc/krb5.conf
+
+# Добавляем форвардер в smb.conf, иначе DNS пойдет **й
+nano /etc/samba/samba.conf
+dns forwarder = 192.168.0.1
+
+# На клиенте:
+realm join -U user1.hq au-team.irpo
+2. Файловое хранилище (HQ-SRV)
+# Проверка дисков
+lsblk
+
+# Сносим таблицу разделов и создаем новую GPT
+fdisk /dev/sdb
+g
+n
+Enter
+Enter
+Enter
+w
+
+fdisk /dev/sdc # повторы
+fdisk /dev/sdd
+
+# Создаем RAID5 из 3х дисков
+mdadm --create --verbose /dev/md0 -l 5 -n 3 /dev/sdb1 /dev/sdc1 /dev/sdd1
+
+# Проверка (если тут пусто - вы **лись)
+cat /proc/mdstat
+
+# Форматируем RAID и монтируем
+mkfs.ext4 /dev/md0
+mkdir /raid5
+mount /dev/md0 /raid5
+
+# Запись в fstab чтобы после ребута не искать ж***й
+nano /etc/fstab
+/dev/md0 /raid5 ext4 defaults 0 0
+
+df -h
+NFS-сервер
+# Устанавливаем сервер
+apt-get update
+apt-get install nfs-server
+
+mkdir /raid5/nfs
+systemctl enable --now nfs
+
+# Экспортируем каталог. Без этого клиенты идут **й
+nano /etc/exports
+/raid5/nfs 192.168.0.64/27(rw,subtree_check)
+
+exportfs -a
+
+# Клиентская сторона
+mkdir /mnt/nfs
+mount -t nfs 192.168.0.1:/raid5/nfs /mnt/nfs
+
+nano /etc/fstab
+192.168.0.1:/raid5/nfs /mnt/nfs nfs auto 0 0
+3. Chrony – мать его, служба времени
+# Сервер
+nano /etc/chrony.conf
+# закомментируй pool.ntp.org и добавь:
+server 127.0.0.1 iburst prefer
+allow any
+
+# Клиенты
+nano /etc/chrony.conf
+server 172.16.4.1 iburst prefer
+
+chronyc sources
+systemctl restart chronyd
+4. Ansible (BR-SRV)
+
+
+# SSH ключи (не забыть дать в морду если не работает)
+ssh-keygen -t rsa
+ssh-copy-id user@192.168.0.65  -p 22
+
+ssh-copy-id net_admin@192.168.0.62 -p 22
+
+ssh-copy-id net_admin@192.168.3.30
+
+ssh-copy-id sshuser@192.168.0.1 -p 2024
+
+# Установка
+apt-get install ansible -y
+
+# Инвентарь
+nano /etc/ansible/inv
+[hq]
+192.168.0.62 ansible_user=net_admin
+192.168.0.1 ansible_port=2024 ansible_user=sshuser
+192.168.0.65 ansible_user=user
+
+
+[br]
+192.168.3.30 ansible_user=net_admin
+
+ansible all -i /etc/ansible/inv -m ping
+
+# Чтоб не матерился на python
+nano /etc/ansible/ansible.cfg
+interpreter python=auto_silent
+5. Docker и MediaWiki (BR-SRV)
+systemctl enable --now docker
+
+# Образец docker-compose
+docker volume create dbvolume
+docker compose -f wiki.yml up -d
+
+# Настраиваем wiki, иначе всё пойдет в **пу
+scp user@192.168.0.65:~/Загрузки/LocalSettings.php ./
+
+nano wiki.yml
+volumes:
+  ./LocalSettings.php:/var/www/html/LocalSettings.php
+
+docker compose -f wiki.yml stop
+docker compose -f wiki.yml up -d
+6. NAT на маршрутизаторах
+# BR-RTR
+nano /etc/nftables/nftables.nft
+table inet nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    oifname "ens19" masquerade
+  }
+  chain prerouting {
+    type nat hook prerouting priority filter;
+    ip daddr 172.16.5.1 tcp dport 2024 dnat ip to 192.168.3.1:2024;
+    ip daddr 172.16.5.1 tcp dport 80 dnat ip to 192.168.3.1:8080;
+  }
+}
+
+# HQ-RTR
+nano /etc/nftables/nftables.nft
+table inet nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    oifname "ens19" masquerade
+  }
+  chain prerouting {
+    type nat hook prerouting priority filter;
+    ip daddr 172.16.4.1 tcp dport 2024 dnat ip to 192.168.0.1:2024;
+  }
+}
+
+# Проверка подключения
+ssh sshuser@172.16.4.1 -p 2024
+ssh sshuser@172.16.5.1 -p 8080
+7. Nginx как прокси на HQ-RTR
+apt-get install nginx -y
+nano /etc/nginx/nginx.conf
+
+http {
+  server {
+    listen 80;
+    server_name moodle.march-revolution.aks;
+    location / {
+      proxy_pass http://192.168.0.1:8080;
+    }
+  }
+
+  server {
+    listen 80;
+    server_name wiki.march-revolution.aks;
+    location / {
+      proxy_pass http://192.168.0.1:80;
+    }
+  }
+}
+
+systemctl restart nginx

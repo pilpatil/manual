@@ -2,6 +2,8 @@
 
 https://telegra.ph/BONDARCHUK-GUIDE-03-24
 
+wget -O test.md https://mirea.dsvinka.ru && nano test.md
+
 IP-адреса машин
 Имя	IP-адрес
 HQ RTR	172.16.4.1
